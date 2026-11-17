@@ -36,6 +36,9 @@ public final class GameView extends View {
             {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
     private static final float S_MIN = -2.5f, S_MAX = 14.5f;   // semitone range shown on screen
 
+    // Depth. z = 1 is the plane the ball lives on; boards spawn at Z_FAR and fly past the camera.
+    private static final float Z_FAR = 5f, Z_GONE = 0.55f, Z_MARGIN = 0.02f;
+
     private enum State { MENU, TUNE, INTRO, PLAY, OVER }
 
     // ---- level definition ----
@@ -51,20 +54,19 @@ public final class GameView extends View {
     }
 
     private static final class Wall {
-        float x, thick;
+        float z, dz;            // front face depth and thickness
         int deg;
         float s0, s, tol0, tol;
         boolean slide, door, shrink;
         float phase, open = 1f;
-        boolean hit, passed, entered, bumped;
+        boolean passed, entered, bumped;
         float errSum;
         int errN;
-        float fade = 1f;
     }
 
     private static final class Star {
-        float x, s, spin;
-        boolean taken;
+        float z, s, spin;
+        boolean taken, missed;
     }
 
     private static final class Particle {
@@ -97,6 +99,8 @@ public final class GameView extends View {
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
+    private final Path path2 = new Path();
+    private final Paint sp = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF rect = new RectF();
     private final float[] hsv = new float[3];
 
@@ -107,6 +111,7 @@ public final class GameView extends View {
 
     // ---- layout ----
     private float w, h, playTop, playBottom, semPx, ballX, ballR;
+    private float vx, vy, wallL, wallR, scroll;   // vanishing point, board edges on the ball plane
 
     // ---- state ----
     private State state = State.MENU;
@@ -174,12 +179,24 @@ public final class GameView extends View {
         playTop = h * 0.17f;
         playBottom = h * 0.94f;
         semPx = (playBottom - playTop) / (S_MAX - S_MIN);
-        ballX = w * 0.27f;
+        ballX = w * 0.60f;
+        vx = w * 0.40f;
+        vy = h * 0.38f;
+        wallL = w * 0.29f;
+        wallR = w * 0.91f;
         ballR = w * 0.045f;
         bx = ballX;
         ballY = playBottom - ballR;
         for (int i = 0; i < trail.length; i++) trail[i] = ballY;
     }
+
+    /** Perspective: a point on the ball plane shrinks toward the vanishing point with depth. */
+    private float px(float x, float z) { return vx + (x - vx) / z; }
+    private float py(float y, float z) { return vy + (y - vy) / z; }
+
+    private float zSpeed() { return (Z_FAR - 1f) / (0.8f / lv.speed); }
+
+    private static float clamp01(float v) { return v < 0f ? 0f : (v > 1f ? 1f : v); }
 
     private float yFor(float s) {
         return playBottom - (s - S_MIN) * semPx;
@@ -210,7 +227,7 @@ public final class GameView extends View {
         switch (n) {
             case 1:
                 l.name = "Do  Re  Mi";
-                l.flair = "Sing the note on the flag to lift the ball through the hole. The board waits until you hit it";
+                l.flair = "Sing the note on the board to lift the ball through the hole. The board waits until you hit it";
                 break;
             case 2:
                 l.name = "Up to Sol";
@@ -244,7 +261,7 @@ public final class GameView extends View {
                 break;
             case 7:
                 l.name = "Trapdoors";
-                l.flair = "Holes open at the last second. Trust the name on the flag";
+                l.flair = "Holes open at the last second. Trust the name on the board";
                 l.pool = range(8); l.count = 10; l.speed = 0.24f; l.gap = 2.8f; l.tol = 1.3f;
                 l.door = true; l.stars = true;
                 break;
@@ -330,8 +347,9 @@ public final class GameView extends View {
         lastDeg = deg;
 
         Wall wl = new Wall();
-        wl.thick = lv.tunnel ? w * 0.34f : w * 0.09f;
-        wl.x = w + w * 0.1f;
+        float vz = zSpeed();
+        wl.z = Z_FAR;
+        wl.dz = lv.tunnel ? vz * 1.4f : vz * 0.15f;
         wl.deg = deg;
         wl.s0 = wl.s = SCALE[deg];
         wl.tol0 = wl.tol = lv.tol;
@@ -350,7 +368,7 @@ public final class GameView extends View {
 
         if (lv.stars && spawned < lv.count && rnd.nextFloat() < 0.6f && !(lv.pairs && spawned % 2 == 1)) {
             Star st = new Star();
-            st.x = wl.x + wl.thick + gap * lv.speed * w * 0.5f;
+            st.z = Z_FAR + gap * 0.5f * vz;
             st.s = SCALE[lv.pool[rnd.nextInt(lv.pool.length)]];
             stars.add(st);
         }
@@ -375,12 +393,12 @@ public final class GameView extends View {
                 break;
             case INTRO:
                 introT -= dt;
-                // boards left over from the last level keep rolling off screen
+                // boards left over from the last level keep flying past
+                scroll += zSpeed() * dt;
                 for (Iterator<Wall> it = walls.iterator(); it.hasNext(); ) {
                     Wall wl = it.next();
-                    wl.x -= lv.speed * w * dt;
-                    if (wl.hit) wl.fade = Math.max(0f, wl.fade - dt * 3f);
-                    if (wl.x + wl.thick < -w * 0.2f) it.remove();
+                    wl.z -= zSpeed() * dt;
+                    if (wl.z + wl.dz < Z_GONE) it.remove();
                 }
                 stars.clear();
                 if (introT <= 0) {
@@ -520,15 +538,14 @@ public final class GameView extends View {
     }
 
     private void updatePlay(float dt) {
-        float v = lv.speed * w;
+        float vz = zSpeed();
 
-        // Boards are solid and patient: if the ball is not lined up with the hole,
-        // the whole line of boards stops and waits until the right note is sung.
+        // Boards are solid and patient: if the ball is not lined up with the hole when a
+        // board reaches it, everything stops and waits until the right note is sung.
         Wall blocker = null;
-        float edge = ballR * 0.6f;
         for (Wall wl : walls) {
-            if (wl.hit || wl.passed) continue;
-            if (bx <= wl.x - edge - v * dt || bx - edge >= wl.x + wl.thick) continue;   // not touching yet / already through
+            if (wl.passed) continue;
+            if (wl.z - vz * dt > 1f + Z_MARGIN || wl.z + wl.dz < 1f - Z_MARGIN) continue;
             float holeY = yFor(wl.s);
             float allowed = Math.max(ballR * 0.5f, wl.tol * semPx - ballR * 0.55f);
             float dy = ballY - holeY;
@@ -536,7 +553,7 @@ public final class GameView extends View {
             if (!wl.entered) {
                 if (inBand) wl.entered = true; else blocker = wl;
             } else if (!inBand) {
-                ballY = holeY + Math.signum(dy) * allowed;   // wood above and below the hole is solid too
+                ballY = holeY + Math.signum(dy) * allowed;   // the wood around the hole is solid too
                 ballVy = 0;
                 blocker = wl;
             }
@@ -547,11 +564,12 @@ public final class GameView extends View {
         }
         if (blocker != null) {
             bump(blocker);
-            v = 0;
+            vz = 0;
             if (stuckWall != blocker) { stuckWall = blocker; stuckT = 0; }
             stuckT += dt;
             // replay the note every couple of seconds as a hint
-            if (stuckT > 1.2f && tonicHz > 0 && !synth.isBusy() && ((int) (stuckT / 2.2f)) != ((int) ((stuckT - dt) / 2.2f))) {
+            if (stuckT > 1.2f && tonicHz > 0 && !synth.isBusy()
+                    && ((int) (stuckT / 2.2f)) != ((int) ((stuckT - dt) / 2.2f))) {
                 synth.tone(noteHz(blocker.deg), 420, 0.24f);
             }
         } else {
@@ -559,39 +577,41 @@ public final class GameView extends View {
             stuckT = 0;
             spawnTimer -= dt;
         }
+        scroll += vz * dt;
         if (spawned < lv.count && spawnTimer <= 0) spawnWall();
 
         for (Iterator<Wall> it = walls.iterator(); it.hasNext(); ) {
             Wall wl = it.next();
-            wl.x -= v * dt;
+            wl.z -= vz * dt;
             if (wl.slide) wl.s = wl.s0 + (float) Math.sin(time * 1.7f + wl.phase) * 1.0f;
             if (wl.door) {
-                float tgt = wl.x < w * 0.66f ? 1f : 0f;
+                float tgt = wl.z < 2.3f ? 1f : 0f;
                 wl.open += (tgt - wl.open) * Math.min(1f, dt * 9f);
             }
             if (wl.shrink) {
-                float prog = Math.max(0f, Math.min(1f, (w - wl.x) / (w - ballX)));
+                float prog = clamp01((Z_FAR - wl.z) / (Z_FAR - 1f));
                 wl.tol = wl.tol0 + (0.85f - wl.tol0) * prog;
             }
-            if (wl.hit) wl.fade = Math.max(0f, wl.fade - dt * 3f);
-
-            if (!wl.hit && !wl.passed && bx - edge >= wl.x + wl.thick) pass(wl);
-            if (wl.x + wl.thick < -w * 0.2f) it.remove();
+            if (!wl.passed && wl.z + wl.dz < 1f - Z_MARGIN) pass(wl);
+            if (wl.z + wl.dz < Z_GONE) it.remove();
         }
 
         for (Iterator<Star> it = stars.iterator(); it.hasNext(); ) {
             Star st = it.next();
-            st.x -= v * dt;
+            st.z -= vz * dt;
             st.spin += dt * 2.5f;
-            float dx = st.x - bx, dy = yFor(st.s) - ballY;
-            if (!st.taken && dx * dx + dy * dy < ballR * ballR * 6.5f) {
-                st.taken = true;
-                score += 5;
-                burst(st.x, yFor(st.s), 0xFFFFE066, 10, 0.5f);
-                pop(st.x, yFor(st.s) - ballR * 2, "+5", 0xFFFFE066);
-                synth.tone(1568f, 70, 0.12f);
+            if (!st.taken && !st.missed && st.z <= 1f) {
+                if (Math.abs(yFor(st.s) - ballY) < ballR * 2.4f) {
+                    st.taken = true;
+                    score += 5;
+                    burst(bx, yFor(st.s), 0xFFFFE066, 10, 0.5f);
+                    pop(bx, yFor(st.s) - ballR * 2, "+5", 0xFFFFE066);
+                    synth.tone(1568f, 70, 0.12f);
+                } else {
+                    st.missed = true;
+                }
             }
-            if (st.taken || st.x < -w * 0.1f) it.remove();
+            if (st.taken || st.z < Z_GONE) it.remove();
         }
 
         if (state == State.PLAY && done >= lv.count) {
@@ -692,12 +712,21 @@ public final class GameView extends View {
             c.translate((rnd.nextFloat() - 0.5f) * a, (rnd.nextFloat() - 0.5f) * a);
         }
         drawBackdrop(c);
+        drawTrack(c);
         drawLanes(c);
-        if (state == State.PLAY || state == State.INTRO || state == State.OVER) {
+        boolean scene = state == State.PLAY || state == State.INTRO || state == State.OVER;
+        if (scene) {
+            for (int i = walls.size() - 1; i >= 0; i--) {          // far to near, behind the ball
+                if (walls.get(i).z >= 1f) drawWall(c, walls.get(i));
+            }
             drawStars(c);
-            drawWalls(c);
         }
         drawBall(c);
+        if (scene) {
+            for (int i = walls.size() - 1; i >= 0; i--) {          // boards already sweeping past the camera
+                if (walls.get(i).z < 1f) drawWall(c, walls.get(i));
+            }
+        }
         drawParticles(c);
         c.restore();
 
@@ -741,18 +770,51 @@ public final class GameView extends View {
         }
     }
 
+    /** The runway the boards slide down, with rungs that scroll so you feel the speed. */
+    private void drawTrack(Canvas c) {
+        float zn = 0.6f, zf = Z_FAR * 4f;
+        float yb = playBottom;
+        path.reset();
+        path.moveTo(px(wallL, zn), py(yb, zn));
+        path.lineTo(px(wallR, zn), py(yb, zn));
+        path.lineTo(px(wallR, zf), py(yb, zf));
+        path.lineTo(px(wallL, zf), py(yb, zf));
+        path.close();
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(0x8C0E1230);
+        c.drawPath(path, p);
+
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(w * 0.006f);
+        p.setColor(0x99FFFFFF);
+        c.drawLine(px(wallL, zn), py(yb, zn), px(wallL, zf), py(yb, zf), p);
+        c.drawLine(px(wallR, zn), py(yb, zn), px(wallR, zf), py(yb, zf), p);
+
+        int rungs = 12;
+        float spacing = 0.5f, range = rungs * spacing;
+        for (int i = 0; i < rungs; i++) {
+            float t = ((i * spacing - scroll) % range + range) % range;
+            float z = 0.62f + t;
+            float a = clamp01((Z_FAR + 1.5f - z) / 3f) * clamp01((z - 0.62f) / 0.2f);
+            p.setStrokeWidth(Math.max(1f, w * 0.006f / z));
+            p.setColor(withAlpha(0xFFFFFFFF, (int) (90 * a)));
+            c.drawLine(px(wallL, z), py(yb, z), px(wallR, z), py(yb, z), p);
+        }
+        p.setStyle(Paint.Style.FILL);
+    }
+
+    /** Note ladder on the left, at the ball's depth: the height each note puts the ball at. */
     private void drawLanes(Canvas c) {
-        // which note does the next board want?
         int want = -1;
-        float nearest = Float.MAX_VALUE;
         if (state == State.PLAY) {
             for (Wall wl : walls) {
-                if (!wl.hit && !wl.passed && wl.x < nearest) { nearest = wl.x; want = wl.deg; }
+                if (!wl.passed) { want = wl.deg; break; }   // list is nearest-first
             }
         }
         int sung = voiced ? nearestDeg(ballS()) : -1;
 
         float pillW = w * 0.115f, pillH = w * 0.062f;
+        tp.setTextAlign(Paint.Align.CENTER);
         tp.setTextSize(w * 0.036f);
         for (int i = 0; i < SCALE.length; i++) {
             float y = yFor(SCALE[i]);
@@ -768,8 +830,8 @@ public final class GameView extends View {
 
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(hot ? w * 0.006f : w * 0.003f);
-            p.setColor(withAlpha(col, hot ? 150 : (inPool ? 70 : 28)));
-            c.drawLine(pillW + w * 0.03f, y, w, y, p);
+            p.setColor(withAlpha(col, hot ? 170 : (inPool ? 70 : 28)));
+            c.drawLine(pillW + w * 0.03f, y, hot ? bx - ballR * 1.6f : w * 0.2f, y, p);
 
             p.setStyle(Paint.Style.FILL);
             float grow = i == want ? 1f + 0.08f * (float) Math.sin(time * 9f) : 1f;
@@ -779,101 +841,127 @@ public final class GameView extends View {
             tp.setColor(withAlpha(0xFF10142E, inPool || hot ? 255 : 130));
             c.drawText(NAMES[i], rect.centerX(), rect.centerY() + tp.getTextSize() * 0.35f, tp);
         }
-
-        // floor
-        p.setStyle(Paint.Style.FILL);
-        p.setColor(0x55FFFFFF);
-        c.drawRect(0, playBottom, w, playBottom + w * 0.008f, p);
     }
 
-    private void drawWalls(Canvas c) {
+    /** One board in perspective: wood face, see-through hole with visible depth, note name on the wood. */
+    private void drawWall(Canvas c, Wall wl) {
+        float zb = wl.z + wl.dz;
+        if (zb < Z_GONE) return;
+        float zf = Math.max(wl.z, 0.5f);
+        float fog = clamp01((Z_FAR - wl.z) / 0.8f);
+        float aFront = fog * (wl.z >= 1f ? 1f : clamp01((wl.z - 0.62f) / 0.38f));
+        float aInner = fog * (zb >= 1f ? 1f : clamp01((zb - Z_GONE) / (1f - Z_GONE)));
+        int col = COLORS[wl.deg];
+
         float top = playTop - w * 0.02f;
-        for (Wall wl : walls) {
-            if (wl.x > w + 10 || wl.fade <= 0) continue;
-            int alpha = (int) (235 * wl.fade);
-            float holeY = yFor(wl.s);
-            float half = wl.tol * semPx * wl.open;
-            float hTop = holeY - half, hBot = holeY + half;
-            float x0 = wl.x, x1 = wl.x + wl.thick;
-            float rr = w * 0.018f;
-            int col = COLORS[wl.deg];
+        float holeY = yFor(wl.s);
+        float half = wl.tol * semPx * wl.open;
+        float halfW = ballR * 2.6f;
+        boolean hasHole = half > 3f;
 
-            // glow inside the hole
-            if (!wl.hit && half > 2) {
-                p.setStyle(Paint.Style.FILL);
-                p.setColor(withAlpha(col, 60));
-                c.drawRect(x0, hTop, x1, hBot, p);
-            }
+        float l = px(wallL, zf), r = px(wallR, zf), t = py(top, zf), b = py(playBottom, zf);
+        float hl = px(ballX - halfW, zf), hr = px(ballX + halfW, zf);
+        float ht = py(holeY - half, zf), hb = py(holeY + half, zf);
+        float rr = w * 0.02f / zf;
 
-            // board, upper and lower halves
+        // inside of the hole: the part of the front opening not covered by the back opening
+        if (hasHole && aInner > 0.01f) {
+            float bl = px(ballX - halfW, zb), br = px(ballX + halfW, zb);
+            float bt = py(holeY - half, zb), bb = py(holeY + half, zb);
+            path.reset();
+            path.addRect(hl, ht, hr, hb, Path.Direction.CW);
+            path2.reset();
+            path2.addRect(bl, bt, br, bb, Path.Direction.CW);
+            path.op(path2, Path.Op.DIFFERENCE);
             p.setStyle(Paint.Style.FILL);
-            p.setColor(withAlpha(0xFFDDA869, alpha));
-            if (hTop > top) {
-                rect.set(x0, top, x1, hTop);
-                c.drawRoundRect(rect, rr, rr, p);
-            }
-            if (hBot < playBottom) {
-                rect.set(x0, hBot, x1, playBottom);
-                c.drawRoundRect(rect, rr, rr, p);
-            }
-            // wood grain
-            p.setColor(withAlpha(0xFFBE8A50, (int) (alpha * 0.8f)));
-            float plank = w * 0.11f;
-            for (float y = top + plank; y < playBottom; y += plank) {
-                if (y > hTop - 4 && y < hBot + 4) continue;
-                c.drawRect(x0, y, x1, y + w * 0.005f, p);
-            }
-            p.setColor(withAlpha(0xFFF3D2A0, (int) (alpha * 0.7f)));
-            if (hTop > top) c.drawRect(x0, top + rr, x0 + w * 0.008f, hTop - rr, p);
-            if (hBot < playBottom) c.drawRect(x0, hBot + rr, x0 + w * 0.008f, playBottom - rr, p);
-
-            if (wl.hit) continue;
-
-            // coloured rim on the hole
-            p.setColor(col);
-            float rim = w * 0.012f;
-            c.drawRect(x0 - rim * 0.4f, hTop - rim, x1 + rim * 0.4f, hTop, p);
-            c.drawRect(x0 - rim * 0.4f, hBot, x1 + rim * 0.4f, hBot + rim, p);
-
-            // trapdoor still shut: show where it will open
-            if (wl.door && wl.open < 0.5f) {
-                tp.setTextSize(w * 0.07f);
-                tp.setColor(0xFFFFFFFF);
-                c.drawText("?", (x0 + x1) / 2, holeY + tp.getTextSize() * 0.35f, tp);
-            }
-
-            // flag with the note name on top of the board
-            float fw = w * 0.2f, fh = w * 0.1f;
-            float fx = (x0 + x1) / 2, fy = top - fh * 0.62f;
-            p.setColor(0xFF10142E);
-            rect.set(fx - fw / 2 - 4, fy - fh / 2 - 4, fx + fw / 2 + 4, fy + fh / 2 + 4);
-            c.drawRoundRect(rect, fh / 2, fh / 2, p);
-            p.setColor(col);
-            rect.set(fx - fw / 2, fy - fh / 2, fx + fw / 2, fy + fh / 2);
-            c.drawRoundRect(rect, fh / 2, fh / 2, p);
-            tp.setTextSize(w * 0.062f);
-            tp.setColor(0xFF10142E);
-            c.drawText(NAMES[wl.deg], fx, fy + tp.getTextSize() * 0.35f, tp);
+            p.setColor(withAlpha(0xFF9A6A38, (int) (245 * aInner)));
+            c.drawPath(path, p);
+            p.setColor(withAlpha(col, (int) (70 * aInner)));
+            c.drawPath(path, p);
         }
+
+        if (aFront <= 0.01f) return;
+
+        // wood face with the hole cut out
+        path.reset();
+        path.setFillType(Path.FillType.EVEN_ODD);
+        rect.set(l, t, r, b);
+        path.addRoundRect(rect, rr, rr, Path.Direction.CW);
+        if (hasHole) {
+            rect.set(hl, ht, hr, hb);
+            path.addRoundRect(rect, rr, rr, Path.Direction.CW);
+        }
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(withAlpha(0xFFE0AE70, (int) (250 * aFront)));
+        c.drawPath(path, p);
+        path.setFillType(Path.FillType.WINDING);
+
+        // grain: vertical streaks, skipping the hole
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(Math.max(1f, w * 0.005f / zf));
+        p.setColor(withAlpha(0xFFC48F55, (int) (170 * aFront)));
+        for (int i = 1; i < 9; i++) {
+            float gx = l + (r - l) * (i / 9f + 0.02f * (float) Math.sin(i * 12.9f + wl.phase));
+            if (hasHole && gx > hl - 2 && gx < hr + 2) {
+                c.drawLine(gx, t + rr, gx, ht, p);
+                c.drawLine(gx, hb, gx, b - rr, p);
+            } else {
+                c.drawLine(gx, t + rr, gx, b - rr, p);
+            }
+        }
+        // edge highlight
+        p.setColor(withAlpha(0xFFF6DAAE, (int) (200 * aFront)));
+        p.setStrokeWidth(Math.max(1.5f, w * 0.008f / zf));
+        rect.set(l, t, r, b);
+        c.drawRoundRect(rect, rr, rr, p);
+
+        // coloured rim round the hole
+        if (hasHole) {
+            p.setColor(withAlpha(col, (int) (255 * aFront)));
+            p.setStrokeWidth(Math.max(2f, w * 0.014f / zf));
+            rect.set(hl, ht, hr, hb);
+            c.drawRoundRect(rect, rr, rr, p);
+        }
+        p.setStyle(Paint.Style.FILL);
+
+        // note name printed on the wood, on whichever side of the hole has room
+        float size = w * 0.19f / zf;
+        boolean below = SCALE[wl.deg] >= 7;
+        float fullHalf = wl.tol0 * semPx;
+        float nameY = below ? holeY + fullHalf + w * 0.2f : holeY - fullHalf - w * 0.07f;
+        float tx = px((wallL + wallR) / 2f, zf), ty = py(nameY, zf);
+        sp.setTypeface(tp.getTypeface());
+        sp.setTextAlign(Paint.Align.CENTER);
+        sp.setTextSize(size);
+        sp.setStyle(Paint.Style.STROKE);
+        sp.setStrokeWidth(size * 0.09f);
+        sp.setStrokeJoin(Paint.Join.ROUND);
+        sp.setColor(withAlpha(0xFF2A1B0C, (int) (255 * aFront)));
+        String label = wl.door && wl.open < 0.5f ? NAMES[wl.deg] + "?" : NAMES[wl.deg];
+        c.drawText(label, tx, ty, sp);
+        sp.setStyle(Paint.Style.FILL);
+        sp.setColor(withAlpha(0xFFFFFFFF, (int) (255 * aFront)));
+        c.drawText(label, tx, ty, sp);
     }
 
     private void drawStars(Canvas c) {
         p.setStyle(Paint.Style.FILL);
         for (Star st : stars) {
-            if (st.x > w + 60) continue;
-            float cx = st.x, cy = yFor(st.s);
-            float r = w * 0.032f * (1f + 0.1f * (float) Math.sin(st.spin * 2));
+            if (st.z > Z_FAR || st.z < 0.7f) continue;
+            float a = clamp01((Z_FAR - st.z) / 0.8f);
+            float cx = px(ballX, st.z), cy = py(yFor(st.s), st.z);
+            float r = w * 0.04f / st.z * (1f + 0.1f * (float) Math.sin(st.spin * 2));
             path.reset();
             for (int i = 0; i < 10; i++) {
-                double a = st.spin * 0.4 + i * Math.PI / 5 - Math.PI / 2;
+                double ang = st.spin * 0.4 + i * Math.PI / 5 - Math.PI / 2;
                 float rad = i % 2 == 0 ? r : r * 0.45f;
-                float px = cx + (float) Math.cos(a) * rad, py = cy + (float) Math.sin(a) * rad;
-                if (i == 0) path.moveTo(px, py); else path.lineTo(px, py);
+                float sx = cx + (float) Math.cos(ang) * rad, sy = cy + (float) Math.sin(ang) * rad;
+                if (i == 0) path.moveTo(sx, sy); else path.lineTo(sx, sy);
             }
             path.close();
-            p.setColor(0x55FFE066);
+            p.setColor(withAlpha(0xFFFFE066, (int) (85 * a)));
             c.drawCircle(cx, cy, r * 1.5f, p);
-            p.setColor(0xFFFFE066);
+            p.setColor(withAlpha(0xFFFFE066, (int) (255 * a)));
             c.drawPath(path, p);
         }
     }
@@ -883,13 +971,20 @@ public final class GameView extends View {
         int col = deg >= 0 ? COLORS[deg] : 0xFFF2F2F7;
         p.setStyle(Paint.Style.FILL);
 
-        // streamer
-        float step = w * 0.016f;
+        // shadow on the runway
+        float lift = clamp01((playBottom - ballY) / (playBottom - playTop));
+        p.setColor(withAlpha(0xFF000000, (int) (110 - 60 * lift)));
+        rect.set(bx - ballR * (1.1f - 0.4f * lift), playBottom - ballR * 0.22f,
+                bx + ballR * (1.1f - 0.4f * lift), playBottom + ballR * 0.22f);
+        c.drawOval(rect, p);
+
+        // motion smear
+        float step = 0f;
         for (int i = 1; i < trail.length; i++) {
             int idx = ((trailHead - i) % trail.length + trail.length) % trail.length;
             float k = 1f - i / (float) trail.length;
-            p.setColor(withAlpha(col, (int) (120 * k)));
-            c.drawCircle(bx - i * step, trail[idx], ballR * (0.25f + 0.6f * k), p);
+            p.setColor(withAlpha(col, (int) (45 * k)));
+            c.drawCircle(bx - i * step, trail[idx], ballR * (0.5f + 0.45f * k), p);
         }
 
         if (voiced) {
@@ -976,10 +1071,10 @@ public final class GameView extends View {
         rect.set(bx, by, bx + bw * Math.min(1f, done / (float) Math.max(1, lv.count)), by + w * 0.012f);
         c.drawRoundRect(rect, w * 0.006f, w * 0.006f, p);
 
-        if (state == State.PLAY && silentT > 2.5f && levelNo <= 2) {
+        if (state == State.PLAY && silentT > 2.5f && levelNo <= 2 && stuckWall == null) {
             tp.setTextSize(w * 0.045f);
             tp.setColor(withAlpha(0xFFFFFFFF, (int) (170 + 80 * Math.sin(time * 5f))));
-            c.drawText("Sing to lift the ball!", w * 0.58f, playBottom - w * 0.06f, tp);
+            c.drawText("Sing to lift the ball!", w * 0.5f, playBottom + w * 0.07f, tp);
         }
     }
 

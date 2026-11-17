@@ -1,9 +1,9 @@
 # Do Re Mi Ball
 
-Sing to play. Boards with a hole roll in from the right, each flagged with a note
-(Do, Re, Mi...). Your voice sets the ball's height: sing that note and the ball
-lifts to the hole and slips through. Go quiet and it drops to the floor.
-Your selfie camera is the backdrop.
+Sing to play. Wooden boards come straight at you down a runway, each with a hole
+and a note printed on the wood (Do, Re, Mi...). Your voice sets the ball's height:
+sing that note and the ball lifts to the hole and the board sweeps past. Go quiet
+and it drops to the floor. Your selfie camera is the backdrop.
 
 ## Levels
 
