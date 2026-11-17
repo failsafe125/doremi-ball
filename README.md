@@ -21,9 +21,9 @@ Your selfie camera is the backdrop.
 | 10 | Ode to Joy | Faster tune, disco lights |
 | 11+ | Chaos | Two random twists at once, faster every level |
 
-Boards are solid: off the note, the ball hits the wood and gets shoved left. Get on
-the note and it pops through; get pushed off the screen and you lose a life.
-Three lives, +1 for each level cleared (max 5). Streaks multiply your points and
+Boards are solid: off the note, the ball hits the wood and the whole line of boards
+stops and waits until you find the note (it replays the pitch as a hint). There are
+no lives. Clean passes build a streak that multiplies your points, and
 staying centred in the hole scores a "Perfect".
 
 ## Get the APK

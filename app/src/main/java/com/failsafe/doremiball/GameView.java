@@ -117,6 +117,8 @@ public final class GameView extends View {
     private int spawned, done, lastDeg = -1;
     private float spawnTimer, endTimer, introT, shake, flash;
     private boolean startAfterTune;
+    private float stuckT;
+    private Wall stuckWall;
 
     private float bx, ballY, ballVy, silentT = 9f;   // bx = where the ball is now, ballX = its home spot
     private boolean voiced;
@@ -208,7 +210,7 @@ public final class GameView extends View {
         switch (n) {
             case 1:
                 l.name = "Do  Re  Mi";
-                l.flair = "Sing the note on the flag to lift the ball through the hole. Miss and the board shoves you back";
+                l.flair = "Sing the note on the flag to lift the ball through the hole. The board waits until you hit it";
                 break;
             case 2:
                 l.name = "Up to Sol";
@@ -300,6 +302,7 @@ public final class GameView extends View {
         stars.clear();
         pops.clear();
         bx = ballX;
+        stuckWall = null;
         beginLevel(1);
     }
 
@@ -519,7 +522,43 @@ public final class GameView extends View {
     private void updatePlay(float dt) {
         float v = lv.speed * w;
 
-        spawnTimer -= dt;
+        // Boards are solid and patient: if the ball is not lined up with the hole,
+        // the whole line of boards stops and waits until the right note is sung.
+        Wall blocker = null;
+        float edge = ballR * 0.6f;
+        for (Wall wl : walls) {
+            if (wl.hit || wl.passed) continue;
+            if (bx <= wl.x - edge - v * dt || bx - edge >= wl.x + wl.thick) continue;   // not touching yet / already through
+            float holeY = yFor(wl.s);
+            float allowed = Math.max(ballR * 0.5f, wl.tol * semPx - ballR * 0.55f);
+            float dy = ballY - holeY;
+            boolean inBand = Math.abs(dy) <= allowed;
+            if (!wl.entered) {
+                if (inBand) wl.entered = true; else blocker = wl;
+            } else if (!inBand) {
+                ballY = holeY + Math.signum(dy) * allowed;   // wood above and below the hole is solid too
+                ballVy = 0;
+                blocker = wl;
+            }
+            if (wl.entered) {
+                wl.errSum += Math.min(Math.abs(dy), allowed);
+                wl.errN++;
+            }
+        }
+        if (blocker != null) {
+            bump(blocker);
+            v = 0;
+            if (stuckWall != blocker) { stuckWall = blocker; stuckT = 0; }
+            stuckT += dt;
+            // replay the note every couple of seconds as a hint
+            if (stuckT > 1.2f && tonicHz > 0 && !synth.isBusy() && ((int) (stuckT / 2.2f)) != ((int) ((stuckT - dt) / 2.2f))) {
+                synth.tone(noteHz(blocker.deg), 420, 0.24f);
+            }
+        } else {
+            stuckWall = null;
+            stuckT = 0;
+            spawnTimer -= dt;
+        }
         if (spawned < lv.count && spawnTimer <= 0) spawnWall();
 
         for (Iterator<Wall> it = walls.iterator(); it.hasNext(); ) {
@@ -536,39 +575,7 @@ public final class GameView extends View {
             }
             if (wl.hit) wl.fade = Math.max(0f, wl.fade - dt * 3f);
 
-            // Boards are solid. Off the note, the face shoves the ball left; inside the
-            // hole, touching the wood drags it along. Get on the note to pop through.
-            if (!wl.hit && !wl.passed) {
-                float edge = ballR * 0.6f;
-                float front = wl.x - edge;
-                float holeY = yFor(wl.s);
-                float allowed = Math.max(ballR * 0.5f, wl.tol * semPx - ballR * 0.55f);
-                float dy = ballY - holeY;
-                boolean inBand = Math.abs(dy) <= allowed;
-                if (bx - edge >= wl.x + wl.thick) {
-                    pass(wl);
-                } else if (bx > front) {
-                    if (!wl.entered) {
-                        if (inBand) {
-                            wl.entered = true;
-                        } else {
-                            bx = front;
-                            bump(wl);
-                        }
-                    }
-                    if (wl.entered) {
-                        if (!inBand) {
-                            ballY = holeY + Math.signum(dy) * allowed;
-                            ballVy = 0;
-                            bx -= v * dt;
-                            bump(wl);
-                        }
-                        wl.errSum += Math.min(Math.abs(dy), allowed);
-                        wl.errN++;
-                    }
-                }
-                if (bx < -ballR) squash(wl);
-            }
+            if (!wl.hit && !wl.passed && bx - edge >= wl.x + wl.thick) pass(wl);
             if (wl.x + wl.thick < -w * 0.2f) it.remove();
         }
 
@@ -590,8 +597,8 @@ public final class GameView extends View {
         if (state == State.PLAY && done >= lv.count) {
             endTimer += dt;
             if (endTimer > 0.9f) {
-                lives = Math.min(5, lives + 1);
                 score += 25;
+                saveBest();
                 float d = noteHz(0);
                 synth.notes(0.2f, d, 90, d * 1.26f, 90, d * 1.5f, 90, d * 2f, 220);
                 for (int i = 0; i < 5; i++) {
@@ -603,7 +610,7 @@ public final class GameView extends View {
         }
     }
 
-    /** First touch of the wood: no life lost, but the streak is gone. */
+    /** First touch of the wood: the board stops and the streak is gone. */
     private void bump(Wall wl) {
         if (wl.bumped) return;
         wl.bumped = true;
@@ -613,25 +620,6 @@ public final class GameView extends View {
         pop(bx, ballY - ballR * 2.5f, "Bonk!", 0xFFFF6B6B);
         synth.thud();
         performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
-    }
-
-    /** Shoved clean off the left edge: that costs a life. */
-    private void squash(Wall wl) {
-        wl.hit = true;
-        done++;
-        combo = 0;
-        lives--;
-        shake = 0.35f;
-        flash = 1f;
-        burst(ballR, ballY, 0xFFE3B37A, 22, 0.8f);
-        pop(w * 0.2f, ballY - ballR * 2.5f, "Pushed off!", 0xFFFF6B6B);
-        synth.thud();
-        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-        bx = ballX;
-        if (lives <= 0) {
-            saveBest();
-            state = State.OVER;
-        }
     }
 
     private void pass(Wall wl) {
@@ -645,7 +633,7 @@ public final class GameView extends View {
         int col = COLORS[wl.deg];
         burst(bx, ballY, col, perfect ? 22 : 12, 0.7f);
         pop(bx + ballR * 2, ballY - ballR * 2.5f,
-                (perfect ? "Perfect! +" : wl.bumped ? "Squeezed by +" : "+") + pts, perfect ? 0xFFFFFFFF : col);
+                (perfect ? "Perfect! +" : wl.bumped ? "Got it +" : "+") + pts, perfect ? 0xFFFFFFFF : col);
         if (combo > 0 && combo % 5 == 0) pop(w * 0.5f, h * 0.3f, combo + " in a row!", 0xFFFFE066);
         if (tonicHz > 0) synth.tone(noteHz(wl.deg) * 2f, 80, 0.12f);
     }
@@ -963,9 +951,19 @@ public final class GameView extends View {
         tp.setColor(0xFFFFFFFF);
         c.drawText(lv.name, w * 0.5f, y + w * 0.012f, tp);
 
-        float hs = w * 0.02f;
-        for (int i = 0; i < Math.max(3, lives); i++) {
-            heart(c, w - w * 0.05f - i * hs * 3.1f, y - hs * 0.5f, hs, i < lives ? 0xFFFF5270 : 0x55FFFFFF);
+        tp.setTextAlign(Paint.Align.RIGHT);
+        tp.setTextSize(w * 0.036f);
+        tp.setColor(0xCCFFE066);
+        c.drawText("BEST " + Math.max(best, score), w * 0.96f, y - w * 0.012f, tp);
+        tp.setTextAlign(Paint.Align.CENTER);
+
+        if (stuckWall != null && state == State.PLAY && stuckT > 0.4f) {
+            float pulse = 1f + 0.06f * (float) Math.sin(time * 8f);
+            tp.setTextSize(w * 0.085f * pulse);
+            tp.setColor(0xFF10142E);
+            c.drawText("Sing " + NAMES[stuckWall.deg] + "!", w * 0.5f + 4, playTop + w * 0.2f + 4, tp);
+            tp.setColor(COLORS[stuckWall.deg]);
+            c.drawText("Sing " + NAMES[stuckWall.deg] + "!", w * 0.5f, playTop + w * 0.2f, tp);
         }
 
         // progress through the level
@@ -1149,11 +1147,7 @@ public final class GameView extends View {
         c.drawText(lv.name, w * 0.5f, mid - w * 0.02f, tp);
         tp.setTextSize(w * 0.042f);
         tp.setColor(withAlpha(0xFFFFFFFF, (int) (235 * k)));
-        float y = wrapped(c, lv.flair, w * 0.5f, mid + w * 0.08f, w * 0.74f, w * 0.058f);
-        if (levelNo > 1) {
-            tp.setColor(withAlpha(0xFFFF5270, (int) (255 * k)));
-            c.drawText("+1 life", w * 0.5f, y + w * 0.02f, tp);
-        }
+        wrapped(c, lv.flair, w * 0.5f, mid + w * 0.08f, w * 0.74f, w * 0.058f);
     }
 
     private void drawOver(Canvas c) {
