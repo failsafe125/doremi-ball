@@ -56,7 +56,7 @@ public final class GameView extends View {
         float s0, s, tol0, tol;
         boolean slide, door, shrink;
         float phase, open = 1f;
-        boolean hit, passed;
+        boolean hit, passed, entered, bumped;
         float errSum;
         int errN;
         float fade = 1f;
@@ -118,7 +118,7 @@ public final class GameView extends View {
     private float spawnTimer, endTimer, introT, shake, flash;
     private boolean startAfterTune;
 
-    private float ballY, ballVy, silentT = 9f;
+    private float bx, ballY, ballVy, silentT = 9f;   // bx = where the ball is now, ballX = its home spot
     private boolean voiced;
     private final float[] trail = new float[16];
     private int trailHead;
@@ -174,6 +174,7 @@ public final class GameView extends View {
         semPx = (playBottom - playTop) / (S_MAX - S_MIN);
         ballX = w * 0.27f;
         ballR = w * 0.045f;
+        bx = ballX;
         ballY = playBottom - ballR;
         for (int i = 0; i < trail.length; i++) trail[i] = ballY;
     }
@@ -207,7 +208,7 @@ public final class GameView extends View {
         switch (n) {
             case 1:
                 l.name = "Do  Re  Mi";
-                l.flair = "Sing the note on the flag to lift the ball through the hole";
+                l.flair = "Sing the note on the flag to lift the ball through the hole. Miss and the board shoves you back";
                 break;
             case 2:
                 l.name = "Up to Sol";
@@ -298,6 +299,7 @@ public final class GameView extends View {
         walls.clear();
         stars.clear();
         pops.clear();
+        bx = ballX;
         beginLevel(1);
     }
 
@@ -450,6 +452,12 @@ public final class GameView extends View {
         if (ballY > floor) ballY = floor;
         if (ballY < playTop + ballR) ballY = playTop + ballR;
 
+        // roll back to the home spot after a board has shoved the ball left
+        if (bx < ballX) {
+            bx += Math.min((ballX - bx) * dt * 6f + w * 0.03f * dt, w * 0.9f * dt);
+            if (bx > ballX) bx = ballX;
+        }
+
         trailAcc += dt;
         if (trailAcc > 0.016f) {
             trailAcc = 0;
@@ -528,17 +536,38 @@ public final class GameView extends View {
             }
             if (wl.hit) wl.fade = Math.max(0f, wl.fade - dt * 3f);
 
+            // Boards are solid. Off the note, the face shoves the ball left; inside the
+            // hole, touching the wood drags it along. Get on the note to pop through.
             if (!wl.hit && !wl.passed) {
-                float left = wl.x - ballR * 0.35f, right = wl.x + wl.thick + ballR * 0.35f;
-                if (ballX > left && ballX < right) {
-                    float dy = Math.abs(ballY - yFor(wl.s));
-                    float allowed = Math.max(ballR * 0.5f, wl.tol * semPx - ballR * 0.55f);
-                    wl.errSum += dy;
-                    wl.errN++;
-                    if (dy > allowed) crash(wl);
-                } else if (ballX >= right) {
+                float edge = ballR * 0.6f;
+                float front = wl.x - edge;
+                float holeY = yFor(wl.s);
+                float allowed = Math.max(ballR * 0.5f, wl.tol * semPx - ballR * 0.55f);
+                float dy = ballY - holeY;
+                boolean inBand = Math.abs(dy) <= allowed;
+                if (bx - edge >= wl.x + wl.thick) {
                     pass(wl);
+                } else if (bx > front) {
+                    if (!wl.entered) {
+                        if (inBand) {
+                            wl.entered = true;
+                        } else {
+                            bx = front;
+                            bump(wl);
+                        }
+                    }
+                    if (wl.entered) {
+                        if (!inBand) {
+                            ballY = holeY + Math.signum(dy) * allowed;
+                            ballVy = 0;
+                            bx -= v * dt;
+                            bump(wl);
+                        }
+                        wl.errSum += Math.min(Math.abs(dy), allowed);
+                        wl.errN++;
+                    }
                 }
+                if (bx < -ballR) squash(wl);
             }
             if (wl.x + wl.thick < -w * 0.2f) it.remove();
         }
@@ -547,7 +576,7 @@ public final class GameView extends View {
             Star st = it.next();
             st.x -= v * dt;
             st.spin += dt * 2.5f;
-            float dx = st.x - ballX, dy = yFor(st.s) - ballY;
+            float dx = st.x - bx, dy = yFor(st.s) - ballY;
             if (!st.taken && dx * dx + dy * dy < ballR * ballR * 6.5f) {
                 st.taken = true;
                 score += 5;
@@ -574,17 +603,31 @@ public final class GameView extends View {
         }
     }
 
-    private void crash(Wall wl) {
+    /** First touch of the wood: no life lost, but the streak is gone. */
+    private void bump(Wall wl) {
+        if (wl.bumped) return;
+        wl.bumped = true;
+        combo = 0;
+        shake = 0.18f;
+        burst(bx + ballR, ballY, 0xFFE3B37A, 10, 0.5f);
+        pop(bx, ballY - ballR * 2.5f, "Bonk!", 0xFFFF6B6B);
+        synth.thud();
+        performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+    }
+
+    /** Shoved clean off the left edge: that costs a life. */
+    private void squash(Wall wl) {
         wl.hit = true;
         done++;
         combo = 0;
         lives--;
         shake = 0.35f;
         flash = 1f;
-        burst(ballX + ballR, ballY, 0xFFC98A4B, 22, 0.8f);
-        pop(ballX, ballY - ballR * 2.5f, "Bonk!", 0xFFFF6B6B);
+        burst(ballR, ballY, 0xFFE3B37A, 22, 0.8f);
+        pop(w * 0.2f, ballY - ballR * 2.5f, "Pushed off!", 0xFFFF6B6B);
         synth.thud();
         performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        bx = ballX;
         if (lives <= 0) {
             saveBest();
             state = State.OVER;
@@ -595,13 +638,14 @@ public final class GameView extends View {
         wl.passed = true;
         done++;
         float avg = wl.errN > 0 ? wl.errSum / wl.errN : semPx;
-        boolean perfect = avg < semPx * 0.35f;
-        int pts = 10 * (1 + combo / 4) + (perfect ? 10 : 0);
+        boolean perfect = !wl.bumped && avg < semPx * 0.35f;
+        int pts = wl.bumped ? 5 : 10 * (1 + combo / 4) + (perfect ? 10 : 0);
         score += pts;
-        combo++;
+        if (!wl.bumped) combo++;
         int col = COLORS[wl.deg];
-        burst(ballX, ballY, col, perfect ? 22 : 12, 0.7f);
-        pop(ballX + ballR * 2, ballY - ballR * 2.5f, (perfect ? "Perfect! +" : "+") + pts, perfect ? 0xFFFFFFFF : col);
+        burst(bx, ballY, col, perfect ? 22 : 12, 0.7f);
+        pop(bx + ballR * 2, ballY - ballR * 2.5f,
+                (perfect ? "Perfect! +" : wl.bumped ? "Squeezed by +" : "+") + pts, perfect ? 0xFFFFFFFF : col);
         if (combo > 0 && combo % 5 == 0) pop(w * 0.5f, h * 0.3f, combo + " in a row!", 0xFFFFE066);
         if (tonicHz > 0) synth.tone(noteHz(wl.deg) * 2f, 80, 0.12f);
     }
@@ -775,7 +819,7 @@ public final class GameView extends View {
 
             // board, upper and lower halves
             p.setStyle(Paint.Style.FILL);
-            p.setColor(withAlpha(0xFFB9783A, alpha));
+            p.setColor(withAlpha(0xFFDDA869, alpha));
             if (hTop > top) {
                 rect.set(x0, top, x1, hTop);
                 c.drawRoundRect(rect, rr, rr, p);
@@ -785,13 +829,13 @@ public final class GameView extends View {
                 c.drawRoundRect(rect, rr, rr, p);
             }
             // wood grain
-            p.setColor(withAlpha(0xFF8A5626, (int) (alpha * 0.8f)));
+            p.setColor(withAlpha(0xFFBE8A50, (int) (alpha * 0.8f)));
             float plank = w * 0.11f;
             for (float y = top + plank; y < playBottom; y += plank) {
                 if (y > hTop - 4 && y < hBot + 4) continue;
                 c.drawRect(x0, y, x1, y + w * 0.005f, p);
             }
-            p.setColor(withAlpha(0xFFE0A561, (int) (alpha * 0.7f)));
+            p.setColor(withAlpha(0xFFF3D2A0, (int) (alpha * 0.7f)));
             if (hTop > top) c.drawRect(x0, top + rr, x0 + w * 0.008f, hTop - rr, p);
             if (hBot < playBottom) c.drawRect(x0, hBot + rr, x0 + w * 0.008f, playBottom - rr, p);
 
@@ -857,19 +901,19 @@ public final class GameView extends View {
             int idx = ((trailHead - i) % trail.length + trail.length) % trail.length;
             float k = 1f - i / (float) trail.length;
             p.setColor(withAlpha(col, (int) (120 * k)));
-            c.drawCircle(ballX - i * step, trail[idx], ballR * (0.25f + 0.6f * k), p);
+            c.drawCircle(bx - i * step, trail[idx], ballR * (0.25f + 0.6f * k), p);
         }
 
         if (voiced) {
             p.setColor(withAlpha(col, 70));
-            c.drawCircle(ballX, ballY, ballR * (1.55f + 0.12f * (float) Math.sin(time * 14f)), p);
+            c.drawCircle(bx, ballY, ballR * (1.55f + 0.12f * (float) Math.sin(time * 14f)), p);
         }
         p.setColor(0xFF10142E);
-        c.drawCircle(ballX, ballY, ballR * 1.1f, p);
+        c.drawCircle(bx, ballY, ballR * 1.1f, p);
         p.setColor(col);
-        c.drawCircle(ballX, ballY, ballR, p);
+        c.drawCircle(bx, ballY, ballR, p);
         p.setColor(0x99FFFFFF);
-        c.drawCircle(ballX - ballR * 0.32f, ballY - ballR * 0.35f, ballR * 0.28f, p);
+        c.drawCircle(bx - ballR * 0.32f, ballY - ballR * 0.35f, ballR * 0.28f, p);
     }
 
     private void drawParticles(Canvas c) {
