@@ -1,0 +1,46 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.failsafe.doremiball'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.failsafe.doremiball'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+
+    // Fixed key checked into the repo so every CI build can install over the last one.
+    signingConfigs {
+        shared {
+            storeFile rootProject.file('keystore/doremi.jks')
+            storePassword 'doremiball'
+            keyAlias 'doremi'
+            keyPassword 'doremiball'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.shared
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.shared
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
